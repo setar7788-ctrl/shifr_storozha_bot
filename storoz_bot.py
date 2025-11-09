@@ -1,6 +1,8 @@
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import random, datetime, os
+from datetime import datetime, timedelta
+moscow_time = datetime.utcnow() + timedelta(hours=3)
 
 TOKEN = os.environ.get("TOKEN")
 
