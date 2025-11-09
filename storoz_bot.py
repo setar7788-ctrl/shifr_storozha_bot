@@ -55,4 +55,19 @@ job_queue = app.job_queue
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("new", new_cipher))
 
+# ---- Фейковый веб-сервер для Render ----
+import threading
+from flask import Flask
+
+server = Flask(__name__)
+
+@server.route('/')
+def home():
+    return "Shifr Storozha bot is running!"
+
+def run_web():
+    server.run(host="0.0.0.0", port=10000)
+
+threading.Thread(target=run_web).start()
+
 app.run_polling()
