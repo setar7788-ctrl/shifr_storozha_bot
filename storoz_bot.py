@@ -2,7 +2,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import random, datetime
 
-TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+TOKEN = "8329651905:AAGGrHNsBc_8RWk_xiWxol_SBYD4rj7GoAw"
 
 letters = ['М', 'Г', 'П']
 
