@@ -1,7 +1,8 @@
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import random, os
+import random, os, threading
 from datetime import datetime, time, timedelta
+from flask import Flask
 
 # Московское время (UTC+3)
 moscow_time = datetime.utcnow() + timedelta(hours=3)
@@ -30,9 +31,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команда /new — получить шифр вручную."
     )
 
+    job_queue = context.application.job_queue
+
     # каждые 30 минут с 8:00 до 22:00 (по Москве)
-    for hour in range(5, 20):  # UTC → МСК (+3 часа)
-        for minute in (0, 30):
+    for hour in range(2, 20):  # UTC → МСК (+3 часа)
+        for minute in (0, 05):
             send_time = time(hour=hour, minute=minute)
             job_queue.run_daily(send_reminder, time=send_time, chat_id=chat_id)
 
@@ -49,25 +52,25 @@ async def new_cipher(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---- Основной блок ----
 
-app = ApplicationBuilder().token(TOKEN).build()
-job_queue = app.job_queue
+def start_bot():
+    app = ApplicationBuilder().token(TOKEN).build()
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("new", new_cipher))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("new", new_cipher))
 
-# ---- Фейковый веб-сервер для Render ----
-import threading
-from flask import Flask
+    print("✅ Telegram bot started and polling...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+# ---- Flask для проверки Fly.io ----
 
 server = Flask(__name__)
 
-@server.route('/')
+@server.route("/")
 def home():
-    return "Shifr Storozha bot is running!"
+    return "✅ Shifr Storozha bot is running on Fly.io!"
 
-def run_web():
-    server.run(host="0.0.0.0", port=10000)
-
-threading.Thread(target=run_web).start()
-
-app.run_polling()
+if __name__ == "__main__":
+    # Flask сервер в отдельном потоке
+    threading.Thread(target=lambda: server.run(host="0.0.0.0", port=8080), daemon=True).start()
+    # Бот — в основном потоке
+    start_bot()
