@@ -35,7 +35,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # каждые 30 минут с 8:00 до 22:00 (по Москве)
     for hour in range(2, 20):  # UTC → МСК (+3 часа)
-        for minute in (0, 05):
+        for minute in (0, 5):
             send_time = time(hour=hour, minute=minute)
             job_queue.run_daily(send_reminder, time=send_time, chat_id=chat_id)
 
