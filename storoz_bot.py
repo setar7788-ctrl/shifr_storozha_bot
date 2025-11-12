@@ -80,6 +80,9 @@ def home():
 
 if __name__ == "__main__":
     # Flask-сервер в отдельном потоке
-    threading.Thread(target=lambda: server.run(host="0.0.0.0", port=8080), daemon=True).start()
+    import os
+    PORT = int(os.environ.get("PORT", 5000))
+    threading.Thread(target=lambda: server.run(host="0.0.0.0", port=PORT), daemon=True).start()
+
     # Бот в основном потоке
     start_bot()
