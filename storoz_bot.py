@@ -60,8 +60,11 @@ async def new_cipher(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def start_bot():
     """Инициализация Telegram-бота"""
-    app = ApplicationBuilder().token(TOKEN).build()
+    if not TOKEN:
+        print("❌ Ошибка: переменная TOKEN не найдена! Убедись, что она задана в Bothost.")
+        return
 
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new_cipher))
 
@@ -79,11 +82,10 @@ def home():
 # ---- Точка входа ----
 
 if __name__ == "__main__":
-    import os
-
     # Бот запускаем в отдельном потоке
     threading.Thread(target=start_bot, daemon=True).start()
 
     # Flask-сервер работает в основном потоке
     PORT = int(os.environ.get("PORT", 5000))
     server.run(host="0.0.0.0", port=PORT)
+
