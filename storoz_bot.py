@@ -37,20 +37,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команда /new — получить шифр вручную."
     )
 
-   job_queue = context.application.job_queue
+job_queue = context.application.job_queue
 
-# Напоминания каждые 10 минут с 8:00 до 22:00 (по Москве)
-job_queue.run_repeating(
-    send_reminder,
-    interval=600,  # каждые 10 минут
-    first=0,       # сразу после старта
-    chat_id=chat_id,
-    name="reminder_job"
-)
+# Каждые 10 минут с 8:00 до 22:00 (по Москве)
+for hour in range(8, 22):  # с 8 до 21 включительно
+    for minute in (0, 10, 20, 30, 40, 50):
+        send_time = time(hour, minute)
+        job_queue.run_daily(send_reminder, time=send_time, chat_id=chat_id)
 
-# Шифры в 08:15, 11:17 и 23:00 (по МСК)
-for hour, minute in [(8, 15), (11, 17), (23, 0)]:
-    send_time = time(hour, minute)
+# Шифры в 05, 11, 17, 23 (по МСК)
+for hour in (5, 11, 17, 23):
+    send_time = time(hour, 0)
     job_queue.run_daily(send_cipher, time=send_time, chat_id=chat_id)
 
 async def new_cipher(update: Update, context: ContextTypes.DEFAULT_TYPE):
