@@ -82,10 +82,12 @@ def home():
 # ---- Точка входа ----
 
 if __name__ == "__main__":
-    # Бот запускаем в отдельном потоке
-    threading.Thread(target=start_bot, daemon=True).start()
+    import os
 
-    # Flask-сервер работает в основном потоке
+    # Flask запускаем в отдельном потоке
     PORT = int(os.environ.get("PORT", 5000))
-    server.run(host="0.0.0.0", port=PORT)
+    threading.Thread(target=lambda: server.run(host="0.0.0.0", port=PORT), daemon=True).start()
+
+    # Бот работает в основном потоке (polling должен быть главным!)
+    start_bot()
 
