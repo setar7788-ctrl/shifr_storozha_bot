@@ -8,7 +8,7 @@ from flask import Flask
 moscow_time = datetime.utcnow() + timedelta(hours=3)
 
 # Токен бота берётся из переменной окружения (Bothost / Fly.io)
-TOKEN = os.environ.get("TOKEN")
+TOKEN = os.environ.get("TOKEN") or os.environ.get("BOT_TOKEN")
 
 # Набор возможных букв для шифра
 letters = ['М', 'Г', 'П']
