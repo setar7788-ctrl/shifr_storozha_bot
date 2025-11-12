@@ -59,7 +59,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔁 Напоминания каждые 10 минут
     job_queue.run_repeating(
         send_reminder,
-        interval=60,  # каждые 10 минут
+        interval=1800,  # каждые 30 минут
         first=10,      # через 10 секунд после /start
         chat_id=chat_id,
         name=f"reminder_{chat_id}"
