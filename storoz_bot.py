@@ -37,18 +37,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команда /new — получить шифр вручную."
     )
 
-job_queue = context.application.job_queue
+    job_queue = context.application.job_queue
 
-# Каждые 10 минут с 8:00 до 22:00 (по Москве)
-for hour in range(8, 22):  # с 8 до 21 включительно
-    for minute in (0, 10, 20, 30, 40, 50):
-        send_time = time(hour, minute)
-        job_queue.run_daily(send_reminder, time=send_time, chat_id=chat_id)
+    # Каждые 10 минут с 8:00 до 22:00 (по Москве)
+    for hour in range(8, 22):  # с 8 до 21 включительно
+        for minute in (0, 10, 20, 30, 40, 50):
+            send_time = time(hour - 3, minute)  # UTC-сдвиг (-3)
+            job_queue.run_daily(send_reminder, time=send_time, chat_id=chat_id)
 
-# Шифры в 05, 11, 17, 23 (по МСК)
-for hour in (5, 11, 17, 23):
-    send_time = time(hour, 0)
-    job_queue.run_daily(send_cipher, time=send_time, chat_id=chat_id)
+    # Шифры в 05, 11, 17, 23 (по МСК)
+    for hour in (5, 11, 17, 23):
+        send_time = time(hour - 3, 0)
+        job_queue.run_daily(send_cipher, time=send_time, chat_id=chat_id)
 
 async def new_cipher(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /new — выдать шифр вручную"""
@@ -82,12 +82,9 @@ def home():
 # ---- Точка входа ----
 
 if __name__ == "__main__":
-    import os
-
-    # Flask запускаем в отдельном потоке
+    # Flask-сервер в отдельном потоке
     PORT = int(os.environ.get("PORT", 5000))
     threading.Thread(target=lambda: server.run(host="0.0.0.0", port=PORT), daemon=True).start()
 
-    # Бот работает в основном потоке (polling должен быть главным!)
+    # Бот — в основном потоке
     start_bot()
-
