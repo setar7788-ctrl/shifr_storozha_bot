@@ -59,14 +59,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔁 Напоминания каждые 10 минут
     job_queue.run_repeating(
         send_reminder,
-        interval=600,  # каждые 10 минут
+        interval=60,  # каждые 10 минут
         first=10,      # через 10 секунд после /start
         chat_id=chat_id,
         name=f"reminder_{chat_id}"
     )
 
-    # 🕯️ Шифры в 08:00, 11:00, 17:00, 21:00 (по Москве)
-    moscow_hours = [8, 11, 17, 21]
+    # 🕯️ Шифры в 07:00, 11:00, 17:00, 22:00 (по Москве)
+    moscow_hours = [7, 11, 17, 22]
     for hour in moscow_hours:
         send_time = time(hour - 3, 0)  # переводим в UTC
         job_queue.run_daily(
