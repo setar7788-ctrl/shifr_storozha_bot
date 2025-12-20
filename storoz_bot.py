@@ -672,7 +672,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "🏹 Добро пожаловать, охотник!\n\n"
-        "Команды:\n/status — статус\n/tasks — задачи\n/pinok — пинок\n/morning — начать день\n\n"
+        "Команды:\n/status — статус\n/tasks — задачи\n/pinok — пинок\n/morning — начать день\n"
+        "/evening — вечерний отчёт\n/summary — итоги дня\n\n"
         "Охота начинается завтра в 6:00!"
     )
     schedule_daily_jobs(context)
@@ -719,6 +720,16 @@ async def cmd_morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_morning_message(context)
 
 
+async def cmd_evening(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /evening — вручную запустить вечерний сценарий"""
+    await send_evening_tasks_request(context)
+
+
+async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /summary — вручную показать итоги дня"""
+    await send_final_summary(context, update.effective_chat.id)
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await handle_completed_tasks(update, context):
         return
@@ -750,6 +761,8 @@ def main():
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("pinok", cmd_pinok))
     app.add_handler(CommandHandler("morning", cmd_morning))
+    app.add_handler(CommandHandler("evening", cmd_evening))
+    app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CallbackQueryHandler(handle_role_selection, pattern="^role_"))
     app.add_handler(CallbackQueryHandler(handle_checkin_response, pattern="^checkin_"))
     app.add_handler(CallbackQueryHandler(handle_evening_choice, pattern="^evening_"))
