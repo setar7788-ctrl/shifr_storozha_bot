@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Охотник-Менеджер Telegram Bot
-Исправленная версия с картинками из GitHub
+Исправленная версия с картинками из GitHub и случайным выбором задач
 """
 
 import os
@@ -249,10 +249,12 @@ async def handle_role_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 def generate_daily_plan(role_of_day: str) -> list:
+    """Сформировать план задач на день со СЛУЧАЙНЫМ выбором"""
     tasks = load_tasks()
     daily = load_daily()
     base_count = get_tasks_count_today()
     
+    # Проверяем перенесённые задачи со вчера
     yesterday = get_yesterday_str()
     carried_tasks = []
     
@@ -264,49 +266,58 @@ def generate_daily_plan(role_of_day: str) -> list:
             if carried_tasks:
                 base_count = max(1, base_count - 1)
     
+    # Незавершённые задачи по категориям
     available = {
         "multimillionaire": [t for t in tasks if t.get("category") == "multimillionaire" and not t.get("is_done")],
         "hero": [t for t in tasks if t.get("category") == "hero" and not t.get("is_done")],
         "papa": [t for t in tasks if t.get("category") == "papa" and not t.get("is_done")]
     }
     
+    # Убираем перенесённые из доступных
     carried_ids = [t["id"] for t in carried_tasks]
     for cat in available:
         available[cat] = [t for t in available[cat] if t["id"] not in carried_ids]
-        available[cat].sort(key=lambda x: x.get("times_given", 0))
     
     selected = list(carried_tasks)
     selected_ids = set(carried_ids)
     remaining = base_count - len(selected)
     
+    # Сначала по одной СЛУЧАЙНОЙ задаче из каждой категории
     for cat in ["multimillionaire", "hero", "papa"]:
         if remaining <= 0:
             break
-        for task in available[cat]:
-            if task["id"] not in selected_ids:
-                selected.append(task)
-                selected_ids.add(task["id"])
-                remaining -= 1
-                break
-    
-    if remaining > 0 and role_of_day in available:
-        for task in available[role_of_day]:
-            if remaining <= 0:
-                break
-            if task["id"] not in selected_ids:
-                selected.append(task)
-                selected_ids.add(task["id"])
-                remaining -= 1
-    
-    if remaining > 0:
-        all_available = [t for t in tasks if not t.get("is_done") and t["id"] not in selected_ids]
-        all_available.sort(key=lambda x: x.get("times_given", 0))
-        for task in all_available:
-            if remaining <= 0:
-                break
+        cat_tasks = [t for t in available[cat] if t["id"] not in selected_ids]
+        if cat_tasks:
+            task = random.choice(cat_tasks)  # СЛУЧАЙНЫЙ выбор
             selected.append(task)
             selected_ids.add(task["id"])
             remaining -= 1
+    
+    # Остальные СЛУЧАЙНО из роли дня
+    if remaining > 0 and role_of_day in available:
+        role_tasks = [t for t in available[role_of_day] if t["id"] not in selected_ids]
+        if role_tasks:
+            # Берём случайные задачи из роли дня
+            count_to_take = min(remaining, len(role_tasks))
+            random_tasks = random.sample(role_tasks, count_to_take)
+            for task in random_tasks:
+                selected.append(task)
+                selected_ids.add(task["id"])
+                remaining -= 1
+    
+    # Если всё ещё не хватает — берём СЛУЧАЙНО из любых категорий
+    if remaining > 0:
+        all_available = [t for t in tasks if not t.get("is_done") and t["id"] not in selected_ids]
+        if all_available:
+            count_to_take = min(remaining, len(all_available))
+            random_tasks = random.sample(all_available, count_to_take)
+            for task in random_tasks:
+                selected.append(task)
+                selected_ids.add(task["id"])
+                remaining -= 1
+    
+    # Перемешиваем финальный список для разнообразия порядка
+    random.shuffle(selected)
     
     return selected
 
