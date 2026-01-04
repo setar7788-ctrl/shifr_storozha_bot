@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Охотник-Менеджер Telegram Bot
-Исправленная версия с картинками из GitHub и случайным выбором задач
+Версия 2.0: Гибкое обращение, новогодние выходные, постепенная выдача задач
 """
 
 import os
@@ -100,7 +100,8 @@ def load_settings():
         "checkin_interval_minutes": 45,
         "weekday_tasks_count": 4,
         "weekend_tasks_count": 8,
-        "rank_name": "Молодой охотник",
+        "rank_name": "Вождь",
+        "rank_title": "Вождь",
         "quarter_goals_text": "",
         "reward_high_threshold": 32,
         "reward_mid_threshold": 19,
@@ -152,7 +153,15 @@ def get_yesterday_str():
 
 
 def is_weekend():
-    return datetime.now(TIMEZONE).weekday() >= 5
+    """Проверка выходного: Сб, Вс + новогодние праздники 1-11 января"""
+    now = datetime.now(TIMEZONE)
+    # Обычные выходные
+    if now.weekday() >= 5:
+        return True
+    # Новогодние праздники 1-11 января
+    if now.month == 1 and 1 <= now.day <= 11:
+        return True
+    return False
 
 
 def get_tasks_count_today():
@@ -177,6 +186,12 @@ def get_random_kick():
     return random.choice(phrases) if phrases else "Соберись."
 
 
+def get_title():
+    """Получить обращение к пользователю из настроек"""
+    settings = load_settings()
+    return settings.get("rank_title", settings.get("rank_name", "Вождь"))
+
+
 # ============== УТРЕННЕЕ СООБЩЕНИЕ ==============
 async def send_morning_message(context: ContextTypes.DEFAULT_TYPE):
     settings = load_settings()
@@ -186,17 +201,18 @@ async def send_morning_message(context: ContextTypes.DEFAULT_TYPE):
         logger.warning("user_id не установлен")
         return
     
-    rank_name = settings.get("rank_name", "Молодой охотник")
+    rank_name = settings.get("rank_name", "Вождь")
+    title = get_title()
     goals = settings.get("quarter_goals_text", "Цели не установлены")
     
-    greeting = f"☀️ Доброе утро, охотник!\nТвой ранг: {rank_name}"
+    greeting = f"☀️ Доброе утро, {title}!\nТвой ранг: {rank_name}"
     try:
         await context.bot.send_photo(chat_id=user_id, photo=IMAGES["rank"], caption=greeting)
     except Exception as e:
         logger.error(f"Ошибка картинки ранга: {e}")
         await context.bot.send_message(chat_id=user_id, text=greeting)
     
-    goals_text = f"🏹 КАРТА ОХОТЫ НА КВАРТАЛ:\n\n{goals}"
+    goals_text = f"🏹 КАРТА ПЛЕМЕНИ НА КВАРТАЛ:\n\n{goals}"
     await context.bot.send_message(chat_id=user_id, text=goals_text)
     
     keyboard = [
@@ -221,16 +237,27 @@ async def handle_role_selection(update: Update, context: ContextTypes.DEFAULT_TY
     
     await query.edit_message_text(f"Сегодня ты — {role_names.get(role, role)}")
     
-    tasks_for_today = generate_daily_plan(role)
+    # Генерируем ВСЕ задачи на день
+    all_tasks_for_today = generate_daily_plan(role)
     
     daily = load_daily()
     today = get_today_str()
     yesterday = get_yesterday_str()
     carried_over = yesterday in daily and daily[yesterday].get("reward_sacrificed", False)
     
+    # В выходные — постепенная выдача, в будни — все сразу
+    if is_weekend():
+        # Выдаём первую задачу, остальные в очередь
+        visible_tasks = all_tasks_for_today[:1]
+        pending_tasks = all_tasks_for_today[1:]
+    else:
+        visible_tasks = all_tasks_for_today
+        pending_tasks = []
+    
     daily[today] = {
         "role_of_day": role,
-        "tasks": [t["id"] for t in tasks_for_today],
+        "tasks": [t["id"] for t in visible_tasks],
+        "pending_tasks": [t["id"] for t in pending_tasks],
         "completed_tasks": [],
         "carry_over_tasks": [],
         "reward_sacrificed": False,
@@ -239,13 +266,22 @@ async def handle_role_selection(update: Update, context: ContextTypes.DEFAULT_TY
     }
     save_json(DAILY_FILE, daily)
     
-    tasks_text = "🎯 Твой план охотника на сегодня:\n\n"
-    for i, task in enumerate(tasks_for_today, 1):
+    title = get_title()
+    tasks_text = f"🎯 Твой план на сегодня, {title}:\n\n"
+    for i, task in enumerate(visible_tasks, 1):
         tasks_text += f"{i}) {task['text']}\n"
-    tasks_text += "\nОхота началась! Первый чек-ин через 45 минут. ❤️"
+    
+    if is_weekend() and pending_tasks:
+        tasks_text += f"\n📦 Ещё {len(pending_tasks)} задач появятся в течение дня (каждые 2 часа)"
+    
+    tasks_text += "\n\n🏹 Вперёд! Первый чек-ин через 45 минут. ❤️"
     
     await context.bot.send_message(chat_id=query.message.chat_id, text=tasks_text)
     schedule_checkins(context, query.message.chat_id)
+    
+    # Планируем выдачу остальных задач в выходные
+    if is_weekend() and pending_tasks:
+        schedule_weekend_tasks(context, query.message.chat_id)
 
 
 def generate_daily_plan(role_of_day: str) -> list:
@@ -254,7 +290,6 @@ def generate_daily_plan(role_of_day: str) -> list:
     daily = load_daily()
     base_count = get_tasks_count_today()
     
-    # Проверяем перенесённые задачи со вчера
     yesterday = get_yesterday_str()
     carried_tasks = []
     
@@ -266,14 +301,12 @@ def generate_daily_plan(role_of_day: str) -> list:
             if carried_tasks:
                 base_count = max(1, base_count - 1)
     
-    # Незавершённые задачи по категориям
     available = {
         "multimillionaire": [t for t in tasks if t.get("category") == "multimillionaire" and not t.get("is_done")],
         "hero": [t for t in tasks if t.get("category") == "hero" and not t.get("is_done")],
         "papa": [t for t in tasks if t.get("category") == "papa" and not t.get("is_done")]
     }
     
-    # Убираем перенесённые из доступных
     carried_ids = [t["id"] for t in carried_tasks]
     for cat in available:
         available[cat] = [t for t in available[cat] if t["id"] not in carried_ids]
@@ -282,22 +315,19 @@ def generate_daily_plan(role_of_day: str) -> list:
     selected_ids = set(carried_ids)
     remaining = base_count - len(selected)
     
-    # Сначала по одной СЛУЧАЙНОЙ задаче из каждой категории
     for cat in ["multimillionaire", "hero", "papa"]:
         if remaining <= 0:
             break
         cat_tasks = [t for t in available[cat] if t["id"] not in selected_ids]
         if cat_tasks:
-            task = random.choice(cat_tasks)  # СЛУЧАЙНЫЙ выбор
+            task = random.choice(cat_tasks)
             selected.append(task)
             selected_ids.add(task["id"])
             remaining -= 1
     
-    # Остальные СЛУЧАЙНО из роли дня
     if remaining > 0 and role_of_day in available:
         role_tasks = [t for t in available[role_of_day] if t["id"] not in selected_ids]
         if role_tasks:
-            # Берём случайные задачи из роли дня
             count_to_take = min(remaining, len(role_tasks))
             random_tasks = random.sample(role_tasks, count_to_take)
             for task in random_tasks:
@@ -305,7 +335,6 @@ def generate_daily_plan(role_of_day: str) -> list:
                 selected_ids.add(task["id"])
                 remaining -= 1
     
-    # Если всё ещё не хватает — берём СЛУЧАЙНО из любых категорий
     if remaining > 0:
         all_available = [t for t in tasks if not t.get("is_done") and t["id"] not in selected_ids]
         if all_available:
@@ -316,10 +345,69 @@ def generate_daily_plan(role_of_day: str) -> list:
                 selected_ids.add(task["id"])
                 remaining -= 1
     
-    # Перемешиваем финальный список для разнообразия порядка
     random.shuffle(selected)
-    
     return selected
+
+
+# ============== ПОСТЕПЕННАЯ ВЫДАЧА ЗАДАЧ В ВЫХОДНЫЕ ==============
+def schedule_weekend_tasks(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Запланировать выдачу задач каждые 2 часа в выходные"""
+    for job in context.job_queue.get_jobs_by_name("weekend_task"):
+        job.schedule_removal()
+    
+    context.job_queue.run_repeating(
+        send_next_weekend_task,
+        interval=timedelta(hours=2),
+        first=timedelta(hours=2),
+        chat_id=chat_id,
+        name="weekend_task",
+        data={"chat_id": chat_id}
+    )
+    logger.info("Запланирована постепенная выдача задач в выходные")
+
+
+async def send_next_weekend_task(context: ContextTypes.DEFAULT_TYPE):
+    """Отправить следующую задачу из очереди"""
+    job = context.job
+    chat_id = job.data["chat_id"] if job.data else job.chat_id
+    
+    daily = load_daily()
+    today = get_today_str()
+    
+    if today not in daily:
+        return
+    
+    pending = daily[today].get("pending_tasks", [])
+    if not pending:
+        job.schedule_removal()
+        return
+    
+    next_task_id = pending.pop(0)
+    daily[today]["tasks"].append(next_task_id)
+    daily[today]["pending_tasks"] = pending
+    save_json(DAILY_FILE, daily)
+    
+    tasks = load_tasks()
+    task = next((t for t in tasks if t["id"] == next_task_id), None)
+    
+    if task:
+        title = get_title()
+        task_num = len(daily[today]["tasks"])
+        remaining = len(pending)
+        
+        text = f"📬 Новая задача, {title}!\n\n{task_num}) {task['text']}"
+        if remaining > 0:
+            text += f"\n\n📦 Осталось в очереди: {remaining}"
+        else:
+            text += "\n\n✅ Это последняя задача на сегодня!"
+        
+        settings = load_settings()
+        user_id = settings.get("user_id")
+        if user_id:
+            await context.bot.send_message(chat_id=user_id, text=text)
+    
+    if not pending:
+        job.schedule_removal()
 
 
 # ============== ПИНГИ ==============
@@ -373,7 +461,8 @@ async def send_checkin(context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("4️⃣ Просто отвлёкся (+0 🔥)", callback_data="checkin_distracted")]
     ])
     
-    await context.bot.send_message(chat_id=chat_id, text="⏰ Как продвигается охота?", reply_markup=InlineKeyboardMarkup(keyboard))
+    title = get_title()
+    await context.bot.send_message(chat_id=chat_id, text=f"⏰ {title}, как дела?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def handle_checkin_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -447,18 +536,22 @@ async def send_evening_tasks_request(context: ContextTypes.DEFAULT_TYPE):
     
     for job in context.job_queue.get_jobs_by_name("checkin"):
         job.schedule_removal()
+    for job in context.job_queue.get_jobs_by_name("weekend_task"):
+        job.schedule_removal()
     
     daily = load_daily()
     today = get_today_str()
     if today not in daily or not daily[today].get("tasks"):
-        await context.bot.send_message(chat_id=user_id, text="🌙 Сегодня план не был сформирован. Отдыхай!")
+        title = get_title()
+        await context.bot.send_message(chat_id=user_id, text=f"🌙 {title}, сегодня план не был сформирован. Отдыхай!")
         return
     
     tasks = load_tasks()
     task_map = {t["id"]: t for t in tasks}
     today_tasks = [task_map[tid] for tid in daily[today]["tasks"] if tid in task_map]
     
-    text = "🌙 День подходит к концу.\nЧто из плана ты завершил?\n\n"
+    title = get_title()
+    text = f"🌙 {title}, день подходит к концу.\nЧто из плана ты завершил?\n\n"
     for i, task in enumerate(today_tasks, 1):
         text += f"{i}) {task['text']}\n"
     text += "\nОтветь номерами через запятую (1,3) или 0"
@@ -632,10 +725,11 @@ async def send_final_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int = 
 
 
 async def send_goodnight(context, chat_id):
+    title = get_title()
     try:
-        await context.bot.send_photo(chat_id=chat_id, photo=IMAGES["night"], caption="🌙 Спокойной ночи, охотник.")
+        await context.bot.send_photo(chat_id=chat_id, photo=IMAGES["night"], caption=f"🌙 Спокойной ночи, {title}.")
     except:
-        await context.bot.send_message(chat_id=chat_id, text="🌙 Спокойной ночи, охотник.")
+        await context.bot.send_message(chat_id=chat_id, text=f"🌙 Спокойной ночи, {title}.")
 
 
 def get_reward_by_score(score, settings):
@@ -670,11 +764,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings["user_id"] = user_id
     save_json(SETTINGS_FILE, settings)
     
+    title = get_title()
     await update.message.reply_text(
-        "🏹 Добро пожаловать, охотник!\n\n"
+        f"🏹 Добро пожаловать, {title}!\n\n"
         "Команды:\n/status — статус\n/tasks — задачи\n/pinok — пинок\n/morning — начать день\n"
         "/evening — вечерний отчёт\n/summary — итоги дня\n\n"
-        "Охота начинается завтра в 6:00!"
+        "Вперёд к победам!"
     )
     schedule_daily_jobs(context)
 
@@ -683,8 +778,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = load_settings()
     p = get_today_progress()
     goals = settings.get("quarter_goals_text", "Не установлены")
+    title = get_title()
     await update.message.reply_text(
-        f"🏹 Статус\n\nРанг: {settings.get('rank_name', 'Молодой охотник')}\n\n"
+        f"🏹 Статус {title}\n\nРанг: {settings.get('rank_name', 'Вождь')}\n\n"
         f"📊 Сегодня:\nЧек-инов: {p['checkins']}\nОчки: {p['score']}/{p['max_score']}\n"
         f"Задач: {p['tasks_done']}/{p['tasks_total']}\n\n🎯 Цели:\n{goals}"
     )
@@ -701,13 +797,19 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task_map = {t["id"]: t for t in tasks}
     today_data = daily[today]
     completed = today_data.get("completed_tasks", [])
+    pending = today_data.get("pending_tasks", [])
     
     text = "🎯 План:\n\n"
     for i, tid in enumerate(today_data["tasks"], 1):
         t = task_map.get(tid)
         if t:
             text += f"{'✅' if tid in completed else '⬜'} {i}) {t['text']}\n"
+    
     text += f"\nОтмечено: {today_data.get('done_task_count', 0)}/{len(today_data['tasks'])}"
+    
+    if pending:
+        text += f"\n📦 В очереди: {len(pending)} задач"
+    
     await update.message.reply_text(text)
 
 
@@ -721,12 +823,10 @@ async def cmd_morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_evening(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /evening — вручную запустить вечерний сценарий"""
     await send_evening_tasks_request(context)
 
 
 async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /summary — вручную показать итоги дня"""
     await send_final_summary(context, update.effective_chat.id)
 
 
