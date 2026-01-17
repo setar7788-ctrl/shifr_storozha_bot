@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Охотник-Менеджер Telegram Bot
-Версия 2.0: Гибкое обращение, новогодние выходные, постепенная выдача задач
+Бот «Стоянка» (Мезолит)
+Жёсткий дисциплинарный бот: ты живёшь только если приносишь пользу.
+Период работы: с 17.01.2026 16:00 до 14.02.2026 00:00
 """
 
 import os
@@ -27,29 +28,28 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATA_DIR = Path("/app/data")
 TIMEZONE = pytz.timezone("Europe/Moscow")
 
-# Картинки из GitHub репозитория
-GITHUB_RAW_BASE = "https://raw.githubusercontent.com/setar7788-ctrl/shifr_storozha_bot/main"
-IMAGES = {
-    "rank": f"{GITHUB_RAW_BASE}/Молодой%20Охотник.jpg",
-    "night": f"{GITHUB_RAW_BASE}/для%20телефона.png",
-    "animals": {
-        1: f"{GITHUB_RAW_BASE}/Leming.jpg",
-        2: f"{GITHUB_RAW_BASE}/Zayac.jpg",
-        3: f"{GITHUB_RAW_BASE}/Olen.jpg",
-        4: f"{GITHUB_RAW_BASE}/ovczebyk-ajstok.jpg",
-        5: f"{GITHUB_RAW_BASE}/zubr.jpg",
-    }
-}
+# Период работы бота
+BOT_START = datetime(2026, 1, 17, 16, 0, tzinfo=TIMEZONE)
+BOT_END = datetime(2026, 2, 14, 0, 0, tzinfo=TIMEZONE)
 
-# Пути к файлам данных
-TASKS_FILE = DATA_DIR / "tasks.json"
-SETTINGS_FILE = DATA_DIR / "settings.json"
-DAILY_FILE = DATA_DIR / "daily.json"
-CHECKINS_FILE = DATA_DIR / "checkins.json"
-REWARDS_FILE = DATA_DIR / "rewards.json"
-ANIMALS_FILE = DATA_DIR / "animals.json"
-PHRASES_MOTIVATION_FILE = DATA_DIR / "phrases_motivation.json"
-PHRASES_KICK_FILE = DATA_DIR / "phrases_kick.json"
+# Расписание дня
+WAKEUP_TIME = time(5, 30)
+SLEEP_TIME = time(23, 30)
+
+# Расписание бонусов: (час, минута, название, цена, сообщение_если_нет)
+BONUS_SCHEDULE = [
+    (7, 0, "breakfast_sweet", 2, "Завтрак без вкусняшки"),
+    (9, 0, "coffee", 2, "Кофе запрещён до 10:00"),
+    (12, 0, "lunch_sweet", 2, "Обед без вкусняшки"),
+    (15, 0, "snack_1", 2, "Вкусняшка запрещена"),
+    (18, 0, "dinner_sweet", 2, "Ужин без вкусняшки"),
+    (21, 0, "snack_2", 2, "Вкусняшка запрещена"),
+    (23, 30, "bed", 3, "Сон на коврике"),
+]
+
+# Пути к файлам
+DATA_FILE = DATA_DIR / "stoyanka_data.json"
+PHRASES_FILE = DATA_DIR / "phrases.json"
 
 # Логирование
 logging.basicConfig(
@@ -59,796 +59,684 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ============== РАБОТА С JSON ==============
+# ============== РАБОТА С ДАННЫМИ ==============
 def ensure_data_dir():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_json(filepath: Path, default=None):
-    if default is None:
-        default = {}
+def load_data():
+    """Загрузить данные бота"""
+    default = {
+        "user_id": None,
+        "zubiki": 0,
+        "cold": 0,
+        "today_bonuses_denied": [],  # бонусы, отказанные сегодня (для эскалации)
+        "today_bonuses_blocked": [],  # бонусы, заблокированные до конца дня
+        "last_hour_check": None,  # последняя проверка часа
+        "waiting_for_benefit": False,  # ждём ответа о пользе
+        "current_date": None,  # текущая дата для сброса
+    }
     try:
-        if filepath.exists():
-            with open(filepath, "r", encoding="utf-8") as f:
-                return json.load(f)
+        if DATA_FILE.exists():
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Добавляем недостающие поля
+                for key, value in default.items():
+                    if key not in data:
+                        data[key] = value
+                return data
         return default
     except Exception as e:
-        logger.error(f"Ошибка загрузки {filepath}: {e}")
+        logger.error(f"Ошибка загрузки данных: {e}")
         return default
 
 
-def save_json(filepath: Path, data):
+def save_data(data):
+    """Сохранить данные"""
     try:
         ensure_data_dir()
-        with open(filepath, "w", encoding="utf-8") as f:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
     except Exception as e:
-        logger.error(f"Ошибка сохранения {filepath}: {e}")
-        return False
+        logger.error(f"Ошибка сохранения: {e}")
 
 
-# ============== ЗАГРУЗКА ДАННЫХ ==============
-def load_settings():
-    return load_json(SETTINGS_FILE, {
-        "user_id": None,
-        "timezone": "Europe/Moscow",
-        "weekday_wakeup": "06:00",
-        "weekend_wakeup": "08:00",
-        "workday_end": "22:30",
-        "score_summary_time": "23:00",
-        "checkin_interval_minutes": 45,
-        "weekday_tasks_count": 4,
-        "weekend_tasks_count": 8,
-        "rank_name": "Вождь",
-        "rank_title": "Вождь",
-        "quarter_goals_text": "",
-        "reward_high_threshold": 32,
-        "reward_mid_threshold": 19,
-        "loot_thresholds": {
-            "lemming_max": 14,
-            "hare_max": 27,
-            "deer_max": 36,
-            "muskox_max": 44
-        }
-    })
+def load_phrases():
+    """Загрузить фразы"""
+    default = {
+        "hour_success": [
+            "Тебя заметили. Пока живёшь.",
+            "Польза есть. Стоянка терпит.",
+            "Час не пустой. Можешь остаться.",
+            "Работа видна. Пока не гонят."
+        ],
+        "hour_fail": [
+            "Час пустой. Стоянка не платит за воздух.",
+            "Ты здесь зря.",
+            "Пустота. Зубиков нет.",
+            "Без пользы — без еды. Логично."
+        ],
+        "cold_warning": [
+            "Холод растёт. Ещё один пустой час — штраф.",
+            "Два часа без пользы. Стоянка злится.",
+            "Ты остываешь. Это плохо."
+        ],
+        "cold_penalty": [
+            "Штраф. -1 зубик. Стоянка не терпит бездельников.",
+            "Слишком долго без пользы. -1 зубик.",
+            "Холод достиг предела. Плати."
+        ],
+        "bonus_allowed": [
+            "Зубиков хватает. Разрешено.",
+            "Заработал — получи.",
+            "Польза была — комфорт разрешён."
+        ],
+        "bonus_denied": [
+            "Зубиков мало. Не заслужил.",
+            "Хочешь комфорт — покажи пользу.",
+            "Нет зубиков — нет бонуса. Просто."
+        ],
+        "bonus_blocked": [
+            "Второй отказ. Бонус заблокирован до завтра.",
+            "Ты дважды не заработал. Заблокировано.",
+            "Эскалация. До конца дня — без этого."
+        ],
+        "done_task": [
+            "Дело сделано. +1 зубик.",
+            "Принято. Зубик начислен.",
+            "Работа есть. +1."
+        ],
+        "morning_tasks_yes": [
+            "Хорошо. Работай.",
+            "Задачи есть. Вперёд.",
+            "Не трать время на разговоры. Делай."
+        ],
+        "morning_tasks_no": [
+            "Нет задач? Вот тебе шифры. Сам разберёшься.",
+            "Без плана? Держи коды. Расшифруй сам.",
+            "Лентяй без списка. Вот шифры:"
+        ],
+        "sleep_bed": [
+            "Кровать разрешена. Спи.",
+            "Заработал комфорт. Отдыхай.",
+            "Зубиков хватило. Кровать твоя."
+        ],
+        "sleep_floor": [
+            "Зубиков мало. Коврик.",
+            "Не заработал кровать. Пол.",
+            "Комфорт не для тебя сегодня. Коврик."
+        ],
+        "identity": [
+            "Ты не герой. Ты пришлый. Сначала работа.",
+            "Ты никто. Докажи обратное.",
+            "Пришлый у стоянки. Помни своё место."
+        ],
+        "benefit_question": [
+            "Была польза за последний час?",
+            "Час прошёл. Польза была?",
+            "Отчитайся. Был толк?"
+        ],
+        "no_answer_penalty": [
+            "Молчание = нет пользы.",
+            "Не ответил — значит бездельничал.",
+            "Тишина. Засчитано как ноль."
+        ],
+        "bot_end": [
+            "Срок вышел. Стоянка закрыта. Пора делать нового бота.",
+            "14 февраля. Конец эксперимента. Создавай новый порядок.",
+            "Время Мезолита закончилось. Что дальше — решать тебе."
+        ]
+    }
+    try:
+        if PHRASES_FILE.exists():
+            with open(PHRASES_FILE, "r", encoding="utf-8") as f:
+                phrases = json.load(f)
+                # Добавляем недостающие категории
+                for key, value in default.items():
+                    if key not in phrases:
+                        phrases[key] = value
+                return phrases
+        # Создаём файл с дефолтными фразами
+        ensure_data_dir()
+        with open(PHRASES_FILE, "w", encoding="utf-8") as f:
+            json.dump(default, f, ensure_ascii=False, indent=2)
+        return default
+    except Exception as e:
+        logger.error(f"Ошибка загрузки фраз: {e}")
+        return default
 
 
-def load_tasks():
-    return load_json(TASKS_FILE, [])
-
-
-def load_daily():
-    return load_json(DAILY_FILE, {})
-
-
-def load_checkins():
-    return load_json(CHECKINS_FILE, {})
-
-
-def load_rewards():
-    return load_json(REWARDS_FILE, [])
-
-
-def load_animals():
-    return load_json(ANIMALS_FILE, [])
-
-
-def load_phrases_motivation():
-    return load_json(PHRASES_MOTIVATION_FILE, [])
-
-
-def load_phrases_kick():
-    return load_json(PHRASES_KICK_FILE, [])
+def get_phrase(category: str) -> str:
+    """Получить случайную фразу из категории"""
+    phrases = load_phrases()
+    if category in phrases and phrases[category]:
+        return random.choice(phrases[category])
+    return "..."
 
 
 # ============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
-def get_today_str():
-    return datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+def now_msk():
+    """Текущее время по Москве"""
+    return datetime.now(TIMEZONE)
 
 
-def get_yesterday_str():
-    yesterday = datetime.now(TIMEZONE) - timedelta(days=1)
-    return yesterday.strftime("%Y-%m-%d")
+def today_str():
+    """Сегодняшняя дата строкой"""
+    return now_msk().strftime("%Y-%m-%d")
 
 
-def is_weekend():
-    """Проверка выходного: Сб, Вс + новогодние праздники 1-11 января"""
-    now = datetime.now(TIMEZONE)
-    # Обычные выходные
-    if now.weekday() >= 5:
-        return True
-    # Новогодние праздники 1-11 января
-    if now.month == 1 and 1 <= now.day <= 11:
-        return True
-    return False
+def is_bot_active():
+    """Проверить, активен ли бот (в пределах периода работы)"""
+    now = now_msk()
+    return BOT_START <= now < BOT_END
 
 
-def get_tasks_count_today():
-    settings = load_settings()
-    if is_weekend():
-        return settings.get("weekend_tasks_count", 8)
-    return settings.get("weekday_tasks_count", 4)
+def is_working_hours():
+    """Проверить рабочие часы (5:30 - 23:30)"""
+    now = now_msk()
+    current_time = now.time()
+    return WAKEUP_TIME <= current_time <= SLEEP_TIME
 
 
-def parse_time(time_str):
-    h, m = map(int, time_str.split(":"))
-    return time(hour=h, minute=m)
+def reset_daily_if_needed(data):
+    """Сбросить дневные данные если новый день"""
+    current_date = today_str()
+    if data.get("current_date") != current_date:
+        data["current_date"] = current_date
+        data["today_bonuses_denied"] = []
+        data["today_bonuses_blocked"] = []
+        data["cold"] = 0  # Сбрасываем холод на новый день
+        save_data(data)
+    return data
 
 
-def get_random_motivation():
-    phrases = load_phrases_motivation()
-    return random.choice(phrases) if phrases else "Отлично!"
-
-
-def get_random_kick():
-    phrases = load_phrases_kick()
-    return random.choice(phrases) if phrases else "Соберись."
-
-
-def get_title():
-    """Получить обращение к пользователю из настроек"""
-    settings = load_settings()
-    return settings.get("rank_title", settings.get("rank_name", "Вождь"))
-
-
-# ============== УТРЕННЕЕ СООБЩЕНИЕ ==============
+# ============== УТРЕННИЙ ПРОТОКОЛ ==============
 async def send_morning_message(context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-    user_id = settings.get("user_id")
-    
-    if not user_id:
-        logger.warning("user_id не установлен")
+    """Утреннее сообщение в 5:30"""
+    if not is_bot_active():
+        await check_bot_end(context)
         return
     
-    rank_name = settings.get("rank_name", "Вождь")
-    title = get_title()
-    goals = settings.get("quarter_goals_text", "Цели не установлены")
+    data = load_data()
+    user_id = data.get("user_id")
+    if not user_id:
+        return
     
-    greeting = f"☀️ Доброе утро, {title}!\nТвой ранг: {rank_name}"
-    try:
-        await context.bot.send_photo(chat_id=user_id, photo=IMAGES["rank"], caption=greeting)
-    except Exception as e:
-        logger.error(f"Ошибка картинки ранга: {e}")
-        await context.bot.send_message(chat_id=user_id, text=greeting)
+    data = reset_daily_if_needed(data)
     
-    goals_text = f"🏹 КАРТА ПЛЕМЕНИ НА КВАРТАЛ:\n\n{goals}"
-    await context.bot.send_message(chat_id=user_id, text=goals_text)
+    # Статус
+    zubiki = data.get("zubiki", 0)
     
     keyboard = [
-        [InlineKeyboardButton("💰 Мультимиллионер", callback_data="role_multimillionaire")],
-        [InlineKeyboardButton("🛡 Герой", callback_data="role_hero")],
-        [InlineKeyboardButton("🧡 Добрый папа", callback_data="role_papa")]
+        [InlineKeyboardButton("✅ Да, есть задачи", callback_data="morning_yes")],
+        [InlineKeyboardButton("❌ Нет задач", callback_data="morning_no")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=user_id, text="Кем ты будешь сегодня?", reply_markup=reply_markup)
+    
+    text = f"☀️ Подъём, Пришлый.\n\n"
+    text += f"💀 Зубики: {zubiki}\n"
+    text += f"❄️ Холод: 0\n\n"
+    text += f"Есть ли у тебя минимум 3 задачи в задачнике?"
+    
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
-# ============== ВЫБОР РОЛИ ==============
-async def handle_role_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_morning_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ответа на утренний вопрос"""
     query = update.callback_query
     await query.answer()
     
-    if not query.data.startswith("role_"):
-        return
-    
-    role = query.data.replace("role_", "")
-    role_names = {"multimillionaire": "💰 Мультимиллионер", "hero": "🛡 Герой", "papa": "🧡 Добрый папа"}
-    
-    await query.edit_message_text(f"Сегодня ты — {role_names.get(role, role)}")
-    
-    # Генерируем ВСЕ задачи на день
-    all_tasks_for_today = generate_daily_plan(role)
-    
-    daily = load_daily()
-    today = get_today_str()
-    yesterday = get_yesterday_str()
-    carried_over = yesterday in daily and daily[yesterday].get("reward_sacrificed", False)
-    
-    # В выходные — постепенная выдача, в будни — все сразу
-    if is_weekend():
-        # Выдаём первую задачу, остальные в очередь
-        visible_tasks = all_tasks_for_today[:1]
-        pending_tasks = all_tasks_for_today[1:]
-    else:
-        visible_tasks = all_tasks_for_today
-        pending_tasks = []
-    
-    daily[today] = {
-        "role_of_day": role,
-        "tasks": [t["id"] for t in visible_tasks],
-        "pending_tasks": [t["id"] for t in pending_tasks],
-        "completed_tasks": [],
-        "carry_over_tasks": [],
-        "reward_sacrificed": False,
-        "carried_over_from_yesterday": carried_over,
-        "done_task_count": 0
-    }
-    save_json(DAILY_FILE, daily)
-    
-    title = get_title()
-    tasks_text = f"🎯 Твой план на сегодня, {title}:\n\n"
-    for i, task in enumerate(visible_tasks, 1):
-        tasks_text += f"{i}) {task['text']}\n"
-    
-    if is_weekend() and pending_tasks:
-        tasks_text += f"\n📦 Ещё {len(pending_tasks)} задач появятся в течение дня (каждые 2 часа)"
-    
-    tasks_text += "\n\n🏹 Вперёд! Первый чек-ин через 45 минут. ❤️"
-    
-    await context.bot.send_message(chat_id=query.message.chat_id, text=tasks_text)
-    schedule_checkins(context, query.message.chat_id)
-    
-    # Планируем выдачу остальных задач в выходные
-    if is_weekend() and pending_tasks:
-        schedule_weekend_tasks(context, query.message.chat_id)
-
-
-def generate_daily_plan(role_of_day: str) -> list:
-    """Сформировать план задач на день со СЛУЧАЙНЫМ выбором"""
-    tasks = load_tasks()
-    daily = load_daily()
-    base_count = get_tasks_count_today()
-    
-    yesterday = get_yesterday_str()
-    carried_tasks = []
-    
-    if yesterday in daily:
-        yesterday_data = daily[yesterday]
-        if yesterday_data.get("reward_sacrificed") and yesterday_data.get("carry_over_tasks"):
-            carry_ids = yesterday_data["carry_over_tasks"]
-            carried_tasks = [t for t in tasks if t["id"] in carry_ids and not t.get("is_done")]
-            if carried_tasks:
-                base_count = max(1, base_count - 1)
-    
-    available = {
-        "multimillionaire": [t for t in tasks if t.get("category") == "multimillionaire" and not t.get("is_done")],
-        "hero": [t for t in tasks if t.get("category") == "hero" and not t.get("is_done")],
-        "papa": [t for t in tasks if t.get("category") == "papa" and not t.get("is_done")]
-    }
-    
-    carried_ids = [t["id"] for t in carried_tasks]
-    for cat in available:
-        available[cat] = [t for t in available[cat] if t["id"] not in carried_ids]
-    
-    selected = list(carried_tasks)
-    selected_ids = set(carried_ids)
-    remaining = base_count - len(selected)
-    
-    for cat in ["multimillionaire", "hero", "papa"]:
-        if remaining <= 0:
-            break
-        cat_tasks = [t for t in available[cat] if t["id"] not in selected_ids]
-        if cat_tasks:
-            task = random.choice(cat_tasks)
-            selected.append(task)
-            selected_ids.add(task["id"])
-            remaining -= 1
-    
-    if remaining > 0 and role_of_day in available:
-        role_tasks = [t for t in available[role_of_day] if t["id"] not in selected_ids]
-        if role_tasks:
-            count_to_take = min(remaining, len(role_tasks))
-            random_tasks = random.sample(role_tasks, count_to_take)
-            for task in random_tasks:
-                selected.append(task)
-                selected_ids.add(task["id"])
-                remaining -= 1
-    
-    if remaining > 0:
-        all_available = [t for t in tasks if not t.get("is_done") and t["id"] not in selected_ids]
-        if all_available:
-            count_to_take = min(remaining, len(all_available))
-            random_tasks = random.sample(all_available, count_to_take)
-            for task in random_tasks:
-                selected.append(task)
-                selected_ids.add(task["id"])
-                remaining -= 1
-    
-    random.shuffle(selected)
-    return selected
-
-
-# ============== ПОСТЕПЕННАЯ ВЫДАЧА ЗАДАЧ В ВЫХОДНЫЕ ==============
-def schedule_weekend_tasks(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Запланировать выдачу задач каждые 2 часа в выходные"""
-    for job in context.job_queue.get_jobs_by_name("weekend_task"):
-        job.schedule_removal()
-    
-    context.job_queue.run_repeating(
-        send_next_weekend_task,
-        interval=timedelta(hours=2),
-        first=timedelta(hours=2),
-        chat_id=chat_id,
-        name="weekend_task",
-        data={"chat_id": chat_id}
-    )
-    logger.info("Запланирована постепенная выдача задач в выходные")
-
-
-async def send_next_weekend_task(context: ContextTypes.DEFAULT_TYPE):
-    """Отправить следующую задачу из очереди"""
-    job = context.job
-    chat_id = job.data["chat_id"] if job.data else job.chat_id
-    
-    daily = load_daily()
-    today = get_today_str()
-    
-    if today not in daily:
-        return
-    
-    pending = daily[today].get("pending_tasks", [])
-    if not pending:
-        job.schedule_removal()
-        return
-    
-    next_task_id = pending.pop(0)
-    daily[today]["tasks"].append(next_task_id)
-    daily[today]["pending_tasks"] = pending
-    save_json(DAILY_FILE, daily)
-    
-    tasks = load_tasks()
-    task = next((t for t in tasks if t["id"] == next_task_id), None)
-    
-    if task:
-        title = get_title()
-        task_num = len(daily[today]["tasks"])
-        remaining = len(pending)
+    if query.data == "morning_yes":
+        phrase = get_phrase("morning_tasks_yes")
+        await query.edit_message_text(f"✅ {phrase}")
         
-        text = f"📬 Новая задача, {title}!\n\n{task_num}) {task['text']}"
-        if remaining > 0:
-            text += f"\n\n📦 Осталось в очереди: {remaining}"
+    elif query.data == "morning_no":
+        # Генерируем шифры
+        p = f"P{random.randint(1, 20)}"
+        m = f"M{random.randint(1, 20)}"
+        g = f"G{random.randint(1, 20)}"
+        
+        phrase = get_phrase("morning_tasks_no")
+        await query.edit_message_text(f"❌ {phrase}\n\n🔢 Шифры:\n• {p}\n• {m}\n• {g}\n\nРасшифруй сам.")
+    
+    # Запускаем первую проверку пользы через расчётное время
+    schedule_next_benefit_check(context)
+
+
+# ============== ПОЧАСОВАЯ ПРОВЕРКА ПОЛЬЗЫ ==============
+def schedule_next_benefit_check(context: ContextTypes.DEFAULT_TYPE):
+    """Запланировать следующую проверку пользы"""
+    # Удаляем старые джобы
+    for job in context.job_queue.get_jobs_by_name("benefit_check"):
+        job.schedule_removal()
+    for job in context.job_queue.get_jobs_by_name("benefit_timeout"):
+        job.schedule_removal()
+    
+    if not is_bot_active():
+        return
+    
+    now = now_msk()
+    current_time = now.time()
+    
+    # Определяем следующий час проверки
+    # Проверки идут: 5:30, 6:30, 7:30, ... 22:30, 23:30
+    if current_time < WAKEUP_TIME:
+        # До подъёма — ждём 5:30
+        next_check = now.replace(hour=5, minute=30, second=0, microsecond=0)
+    elif current_time >= SLEEP_TIME:
+        # После отбоя — ждём завтрашнего утра
+        tomorrow = now + timedelta(days=1)
+        next_check = tomorrow.replace(hour=5, minute=30, second=0, microsecond=0)
+    else:
+        # В рабочее время — следующий :30
+        if current_time.minute < 30:
+            next_check = now.replace(minute=30, second=0, microsecond=0)
         else:
-            text += "\n\n✅ Это последняя задача на сегодня!"
+            next_hour = now + timedelta(hours=1)
+            next_check = next_hour.replace(minute=30, second=0, microsecond=0)
         
-        settings = load_settings()
-        user_id = settings.get("user_id")
-        if user_id:
-            await context.bot.send_message(chat_id=user_id, text=text)
+        # Проверяем что не вышли за 23:30
+        if next_check.time() > SLEEP_TIME:
+            tomorrow = now + timedelta(days=1)
+            next_check = tomorrow.replace(hour=5, minute=30, second=0, microsecond=0)
     
-    if not pending:
-        job.schedule_removal()
-
-
-# ============== ПИНГИ ==============
-def schedule_checkins(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    settings = load_settings()
-    interval = settings.get("checkin_interval_minutes", 45)
+    delay = (next_check - now).total_seconds()
+    if delay < 0:
+        delay = 60  # Минимум минута
     
-    for job in context.job_queue.get_jobs_by_name("checkin"):
-        job.schedule_removal()
+    data = load_data()
+    user_id = data.get("user_id")
+    if user_id:
+        context.job_queue.run_once(
+            send_benefit_check,
+            when=delay,
+            name="benefit_check",
+            data={"user_id": user_id}
+        )
+        logger.info(f"Следующая проверка пользы через {int(delay/60)} мин")
+
+
+async def send_benefit_check(context: ContextTypes.DEFAULT_TYPE):
+    """Отправить вопрос о пользе"""
+    if not is_bot_active():
+        await check_bot_end(context)
+        return
     
-    context.job_queue.run_repeating(
-        send_checkin,
-        interval=timedelta(minutes=interval),
-        first=timedelta(minutes=interval),
-        chat_id=chat_id,
-        name="checkin",
-        data={"chat_id": chat_id}
-    )
-    logger.info(f"Пинги каждые {interval} мин")
-
-
-async def send_checkin(context: ContextTypes.DEFAULT_TYPE):
+    if not is_working_hours():
+        schedule_next_benefit_check(context)
+        return
+    
     job = context.job
-    chat_id = job.data["chat_id"] if job.data else job.chat_id
+    user_id = job.data.get("user_id")
     
-    settings = load_settings()
-    workday_end = parse_time(settings.get("workday_end", "22:30"))
+    data = load_data()
+    data = reset_daily_if_needed(data)
+    data["waiting_for_benefit"] = True
+    data["last_hour_check"] = now_msk().isoformat()
+    save_data(data)
     
-    if datetime.now(TIMEZONE).time() >= workday_end:
-        job.schedule_removal()
-        return
+    keyboard = [
+        [InlineKeyboardButton("✅ Да, была польза", callback_data="benefit_yes")],
+        [InlineKeyboardButton("❌ Нет, пользы не было", callback_data="benefit_no")]
+    ]
     
-    daily = load_daily()
-    today = get_today_str()
-    if today not in daily:
-        return
+    phrase = get_phrase("benefit_question")
+    zubiki = data.get("zubiki", 0)
+    cold = data.get("cold", 0)
     
-    today_data = daily[today]
-    tasks_count = len(today_data.get("tasks", []))
-    done_count = today_data.get("done_task_count", 0)
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"⏰ {phrase}\n\n💀 Зубики: {zubiki} | ❄️ Холод: {cold}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     
-    keyboard = []
-    if done_count < tasks_count:
-        keyboard.append([InlineKeyboardButton("1️⃣ Выполнил задачу (+3 🔥)", callback_data="checkin_done_task")])
+    # Таймаут на ответ — 1 час
+    context.job_queue.run_once(
+        benefit_timeout,
+        when=timedelta(hours=1),
+        name="benefit_timeout",
+        data={"user_id": user_id}
+    )
+
+
+async def benefit_timeout(context: ContextTypes.DEFAULT_TYPE):
+    """Таймаут — пользователь не ответил"""
+    job = context.job
+    user_id = job.data.get("user_id")
+    
+    data = load_data()
+    if not data.get("waiting_for_benefit"):
+        return  # Уже ответил
+    
+    # Засчитываем как "нет"
+    data["waiting_for_benefit"] = False
+    cold = data.get("cold", 0) + 1
+    data["cold"] = cold
+    
+    phrase = get_phrase("no_answer_penalty")
+    response = f"⏰ {phrase}"
+    
+    # Проверяем штраф за холод
+    if cold >= 2:
+        zubiki = data.get("zubiki", 0)
+        new_zubiki = max(0, zubiki - 1)
+        data["zubiki"] = new_zubiki
+        penalty_phrase = get_phrase("cold_penalty")
+        response += f"\n\n❄️ {penalty_phrase}\n💀 Зубики: {new_zubiki}"
     else:
-        keyboard.append([InlineKeyboardButton("✅ Все задачи выполнены!", callback_data="checkin_all_done")])
+        response += f"\n❄️ Холод: {cold}/2"
     
-    keyboard.extend([
-        [InlineKeyboardButton("2️⃣ Работаю над задачами (+2 🔥)", callback_data="checkin_on_tasks")],
-        [InlineKeyboardButton("3️⃣ Важное, но не по плану (+1 🔥)", callback_data="checkin_other_work")],
-        [InlineKeyboardButton("4️⃣ Просто отвлёкся (+0 🔥)", callback_data="checkin_distracted")]
-    ])
+    save_data(data)
+    await context.bot.send_message(chat_id=user_id, text=response)
     
-    title = get_title()
-    await context.bot.send_message(chat_id=chat_id, text=f"⏰ {title}, как дела?", reply_markup=InlineKeyboardMarkup(keyboard))
+    schedule_next_benefit_check(context)
 
 
-async def handle_checkin_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_benefit_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ответа о пользе"""
     query = update.callback_query
     await query.answer()
     
-    if not query.data.startswith("checkin_"):
+    data = load_data()
+    if not data.get("waiting_for_benefit"):
+        await query.edit_message_text("⏰ Время ответа истекло.")
         return
     
-    response_type = query.data.replace("checkin_", "")
-    
-    if response_type == "all_done":
-        await query.edit_message_text("✅ Все задачи отмечены! Продолжай 💪")
-        return
-    
-    checkins = load_checkins()
-    today = get_today_str()
-    if today not in checkins:
-        checkins[today] = []
-    checkins[today].append({"time": datetime.now(TIMEZONE).strftime("%H:%M"), "answer": response_type})
-    save_json(CHECKINS_FILE, checkins)
-    
-    if response_type == "done_task":
-        daily = load_daily()
-        if today in daily:
-            daily[today]["done_task_count"] = daily[today].get("done_task_count", 0) + 1
-            save_json(DAILY_FILE, daily)
-    
-    if response_type in ["done_task", "on_tasks", "other_work"]:
-        phrase = get_random_motivation()
-        points = {"done_task": 3, "on_tasks": 2, "other_work": 1}[response_type]
-        await query.edit_message_text(f"{phrase}\n\n+{points} 🔥")
-    else:
-        await query.edit_message_text(f"{get_random_kick()}\n\n+0 🔥")
-
-
-# ============== ПОДСЧЁТ ОЧКОВ ==============
-def calculate_today_score():
-    checkins = load_checkins()
-    today = get_today_str()
-    if today not in checkins:
-        return 0, 0, 0
-    
-    points_map = {"done_task": 3, "on_tasks": 2, "other_work": 1, "distracted": 0}
-    today_checkins = checkins[today]
-    total_score = sum(points_map.get(c.get("answer", "distracted"), 0) for c in today_checkins)
-    checkin_count = len(today_checkins)
-    
-    daily = load_daily()
-    tasks_count = len(daily.get(today, {}).get("tasks", [])) if today in daily else 4
-    max_score = min(checkin_count, tasks_count) * 3 + max(0, checkin_count - tasks_count) * 2
-    
-    return total_score, max_score, checkin_count
-
-
-def get_today_progress():
-    score, max_score, checkins = calculate_today_score()
-    daily = load_daily()
-    today = get_today_str()
-    tasks_total = len(daily.get(today, {}).get("tasks", [])) if today in daily else 0
-    tasks_done = daily.get(today, {}).get("done_task_count", 0) if today in daily else 0
-    return {"score": score, "max_score": max_score, "checkins": checkins, "tasks_total": tasks_total, "tasks_done": tasks_done}
-
-
-# ============== ВЕЧЕР ==============
-async def send_evening_tasks_request(context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-    user_id = settings.get("user_id")
-    if not user_id:
-        return
-    
-    for job in context.job_queue.get_jobs_by_name("checkin"):
-        job.schedule_removal()
-    for job in context.job_queue.get_jobs_by_name("weekend_task"):
+    # Отменяем таймаут
+    for job in context.job_queue.get_jobs_by_name("benefit_timeout"):
         job.schedule_removal()
     
-    daily = load_daily()
-    today = get_today_str()
-    if today not in daily or not daily[today].get("tasks"):
-        title = get_title()
-        await context.bot.send_message(chat_id=user_id, text=f"🌙 {title}, сегодня план не был сформирован. Отдыхай!")
+    data["waiting_for_benefit"] = False
+    
+    if query.data == "benefit_yes":
+        # +1 зубик, сброс холода
+        zubiki = data.get("zubiki", 0) + 1
+        data["zubiki"] = zubiki
+        data["cold"] = 0
+        save_data(data)
+        
+        phrase = get_phrase("hour_success")
+        await query.edit_message_text(f"✅ {phrase}\n\n💀 +1 зубик. Всего: {zubiki}")
+        
+    elif query.data == "benefit_no":
+        # Увеличиваем холод
+        cold = data.get("cold", 0) + 1
+        data["cold"] = cold
+        
+        phrase = get_phrase("hour_fail")
+        response = f"❌ {phrase}\n\n❄️ Холод: {cold}/2"
+        
+        # Штраф за холод >= 2
+        if cold >= 2:
+            zubiki = data.get("zubiki", 0)
+            new_zubiki = max(0, zubiki - 1)
+            data["zubiki"] = new_zubiki
+            penalty_phrase = get_phrase("cold_penalty")
+            response += f"\n\n💀 {penalty_phrase}\nЗубики: {new_zubiki}"
+        
+        save_data(data)
+        await query.edit_message_text(response)
+    
+    schedule_next_benefit_check(context)
+
+
+# ============== БОНУСЫ ==============
+async def check_bonus(context: ContextTypes.DEFAULT_TYPE):
+    """Проверка бонуса по расписанию"""
+    if not is_bot_active():
         return
     
-    tasks = load_tasks()
-    task_map = {t["id"]: t for t in tasks}
-    today_tasks = [task_map[tid] for tid in daily[today]["tasks"] if tid in task_map]
+    job = context.job
+    bonus_name = job.data.get("bonus_name")
+    price = job.data.get("price")
+    deny_message = job.data.get("deny_message")
+    user_id = job.data.get("user_id")
     
-    title = get_title()
-    text = f"🌙 {title}, день подходит к концу.\nЧто из плана ты завершил?\n\n"
-    for i, task in enumerate(today_tasks, 1):
-        text += f"{i}) {task['text']}\n"
-    text += "\nОтветь номерами через запятую (1,3) или 0"
+    data = load_data()
+    data = reset_daily_if_needed(data)
+    zubiki = data.get("zubiki", 0)
+    blocked = data.get("today_bonuses_blocked", [])
+    denied = data.get("today_bonuses_denied", [])
     
-    context.user_data["waiting_for_completed"] = True
-    context.user_data["today_tasks"] = today_tasks
-    await context.bot.send_message(chat_id=user_id, text=text)
-
-
-async def handle_completed_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("waiting_for_completed"):
-        return False
+    # Проверяем блокировку
+    if bonus_name in blocked:
+        phrase = get_phrase("bonus_blocked")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"🚫 {bonus_name.upper()}: Заблокировано до завтра."
+        )
+        return
     
-    text = update.message.text.strip()
-    today_tasks = context.user_data.get("today_tasks", [])
-    
-    completed_indices = []
-    if text != "0":
-        try:
-            completed_indices = [int(p) - 1 for p in text.replace(" ", "").split(",") if p.isdigit()]
-        except:
-            await update.message.reply_text("Не понял. Напиши номера через запятую или 0")
-            return True
-    
-    completed_ids = [today_tasks[i]["id"] for i in completed_indices if 0 <= i < len(today_tasks)]
-    uncompleted_ids = [t["id"] for i, t in enumerate(today_tasks) if i not in completed_indices]
-    
-    tasks = load_tasks()
-    for task in tasks:
-        if task["id"] in completed_ids:
-            task["is_done"] = True
-            task["times_given"] = task.get("times_given", 0) + 1
-        elif task["id"] in uncompleted_ids:
-            task["times_given"] = task.get("times_given", 0) + 1
-            task["times_skipped"] = task.get("times_skipped", 0) + 1
-    save_json(TASKS_FILE, tasks)
-    
-    daily = load_daily()
-    today = get_today_str()
-    daily[today]["completed_tasks"] = completed_ids
-    save_json(DAILY_FILE, daily)
-    
-    context.user_data["waiting_for_completed"] = False
-    context.user_data["uncompleted_tasks"] = [t for t in today_tasks if t["id"] in uncompleted_ids]
-    
-    if uncompleted_ids:
-        keyboard = [
-            [InlineKeyboardButton("💾 Сохранить задачи (без награды)", callback_data="evening_sacrifice")],
-            [InlineKeyboardButton("🎁 Забрать награду", callback_data="evening_reward")]
-        ]
-        await update.message.reply_text(
-            f"✅ Выполнено: {len(completed_ids)} из {len(today_tasks)}\n\nПеренести незавершённые на завтра?",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+    # Проверяем зубики
+    if zubiki >= price:
+        # Списываем и разрешаем
+        data["zubiki"] = zubiki - price
+        save_data(data)
+        
+        phrase = get_phrase("bonus_allowed")
+        bonus_text = get_bonus_text(bonus_name)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ {bonus_text}: {phrase}\n💀 -{price} зубиков. Осталось: {data['zubiki']}"
         )
     else:
-        await update.message.reply_text(f"🎉 Все {len(completed_ids)} задач выполнены!")
-        await schedule_final_summary(context, update.effective_chat.id)
-    return True
-
-
-async def handle_evening_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "evening_sacrifice":
-        uncompleted = context.user_data.get("uncompleted_tasks", [])
-        if len(uncompleted) == 1:
-            daily = load_daily()
-            today = get_today_str()
-            daily[today]["reward_sacrificed"] = True
-            daily[today]["carry_over_tasks"] = [uncompleted[0]["id"]]
-            save_json(DAILY_FILE, daily)
-            await query.edit_message_text(f"💾 Задача сохранена: {uncompleted[0]['text']}")
-            await send_goodnight(context, query.message.chat_id)
+        # Отказ
+        if bonus_name in denied:
+            # Второй отказ — блокировка
+            blocked.append(bonus_name)
+            data["today_bonuses_blocked"] = blocked
+            save_data(data)
+            
+            phrase = get_phrase("bonus_blocked")
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"🚫 {deny_message}\n\n❄️ {phrase}"
+            )
         else:
-            text = "Какие сохранить?\n\n"
-            for i, t in enumerate(uncompleted, 1):
-                text += f"{i}) {t['text']}\n"
-            context.user_data["waiting_for_carry"] = True
-            await query.edit_message_text(text)
-    elif query.data == "evening_reward":
-        daily = load_daily()
-        today = get_today_str()
-        daily[today]["reward_sacrificed"] = False
-        save_json(DAILY_FILE, daily)
-        await query.edit_message_text("🎁 Награда в 23:00!")
-        await schedule_final_summary(context, query.message.chat_id)
+            # Первый отказ
+            denied.append(bonus_name)
+            data["today_bonuses_denied"] = denied
+            save_data(data)
+            
+            phrase = get_phrase("bonus_denied")
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ {deny_message}\n\n💀 {phrase} (нужно {price}, есть {zubiki})"
+            )
 
 
-async def handle_carry_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("waiting_for_carry"):
-        return False
-    
-    uncompleted = context.user_data.get("uncompleted_tasks", [])
-    try:
-        indices = [int(p) - 1 for p in update.message.text.replace(" ", "").split(",") if p.isdigit()]
-        carry_ids = [uncompleted[i]["id"] for i in indices if 0 <= i < len(uncompleted)]
-    except:
-        await update.message.reply_text("Не понял. Номера через запятую.")
-        return True
-    
-    if not carry_ids:
-        await update.message.reply_text("Не выбрано задач.")
-        return True
-    
-    context.user_data["waiting_for_carry"] = False
-    daily = load_daily()
-    today = get_today_str()
-    daily[today]["reward_sacrificed"] = True
-    daily[today]["carry_over_tasks"] = carry_ids
-    save_json(DAILY_FILE, daily)
-    
-    names = [t["text"] for t in uncompleted if t["id"] in carry_ids]
-    await update.message.reply_text("💾 Сохранено:\n" + "\n".join(f"• {n}" for n in names))
-    await send_goodnight(context, update.effective_chat.id)
-    return True
+def get_bonus_text(bonus_name: str) -> str:
+    """Человекочитаемое название бонуса"""
+    names = {
+        "breakfast_sweet": "🍬 Вкусняшка к завтраку",
+        "coffee": "☕ Кофе",
+        "lunch_sweet": "🍬 Вкусняшка к обеду",
+        "snack_1": "🍬 Вкусняшка (15:00)",
+        "dinner_sweet": "🍬 Вкусняшка к ужину",
+        "snack_2": "🍬 Вкусняшка (21:00)",
+        "bed": "🛏 Кровать",
+    }
+    return names.get(bonus_name, bonus_name)
 
 
-# ============== ИТОГИ ==============
-async def schedule_final_summary(context, chat_id):
-    settings = load_settings()
-    summary_time = parse_time(settings.get("score_summary_time", "23:00"))
-    now = datetime.now(TIMEZONE)
+def schedule_bonuses(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    """Запланировать все бонусы на сегодня"""
+    # Удаляем старые
+    for job in context.job_queue.get_jobs_by_name("bonus"):
+        job.schedule_removal()
     
-    if now.time() >= summary_time:
-        await send_final_summary(context, chat_id)
-    else:
-        target = now.replace(hour=summary_time.hour, minute=summary_time.minute, second=0)
-        context.job_queue.run_once(lambda ctx: send_final_summary(ctx, chat_id), when=(target - now).total_seconds())
+    now = now_msk()
+    today = now.date()
+    
+    for hour, minute, name, price, deny_msg in BONUS_SCHEDULE:
+        bonus_time = datetime.combine(today, time(hour, minute), tzinfo=TIMEZONE)
+        
+        # Если время уже прошло сегодня — пропускаем
+        if bonus_time <= now:
+            continue
+        
+        delay = (bonus_time - now).total_seconds()
+        
+        context.job_queue.run_once(
+            check_bonus,
+            when=delay,
+            name="bonus",
+            data={
+                "bonus_name": name,
+                "price": price,
+                "deny_message": deny_msg,
+                "user_id": user_id
+            }
+        )
+    
+    logger.info("Бонусы запланированы")
 
 
-async def send_final_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
-    if chat_id is None:
-        chat_id = load_settings().get("user_id")
-    
-    daily = load_daily()
-    today = get_today_str()
-    if today in daily and daily[today].get("reward_sacrificed"):
+# ============== КОМАНДА /done ==============
+async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отметить выполненное дело"""
+    if not is_bot_active():
+        await update.message.reply_text("Бот неактивен.")
         return
     
-    score, max_score, checkin_count = calculate_today_score()
-    percent = int(score / max_score * 100) if max_score > 0 else 0
+    data = load_data()
+    zubiki = data.get("zubiki", 0) + 1
+    data["zubiki"] = zubiki
+    save_data(data)
     
-    if percent >= 80:
-        verdict = "🔥 Супердень!"
-    elif percent >= 60:
-        verdict = "💪 Крепкий день!"
-    elif percent >= 40:
-        verdict = "👍 Нормальный день"
-    else:
-        verdict = "😐 День-разбор"
-    
-    await context.bot.send_message(chat_id=chat_id, text=f"📊 ИТОГИ\n\nЧек-инов: {checkin_count}\nОчки: {score}/{max_score} ({percent}%)\n{verdict}")
-    
-    settings = load_settings()
-    reward = get_reward_by_score(score, settings)
-    if reward:
-        await context.bot.send_message(chat_id=chat_id, text=f"🎁 Награда:\n{reward['text']}")
-    
-    animal = get_animal_by_score(score, settings)
-    if animal:
-        level = animal.get("level", 1)
-        image_url = IMAGES["animals"].get(level)
-        text = f"🏆 Добыча: {animal['name']}\n\n{animal['description']}\n\n\"{animal['verdict']}\""
-        try:
-            await context.bot.send_photo(chat_id=chat_id, photo=image_url, caption=text)
-        except:
-            await context.bot.send_message(chat_id=chat_id, text=text)
-    
-    await send_goodnight(context, chat_id)
+    phrase = get_phrase("done_task")
+    await update.message.reply_text(f"✅ {phrase}\n💀 Всего зубиков: {zubiki}")
 
 
-async def send_goodnight(context, chat_id):
-    title = get_title()
-    try:
-        await context.bot.send_photo(chat_id=chat_id, photo=IMAGES["night"], caption=f"🌙 Спокойной ночи, {title}.")
-    except:
-        await context.bot.send_message(chat_id=chat_id, text=f"🌙 Спокойной ночи, {title}.")
-
-
-def get_reward_by_score(score, settings):
-    rewards = load_rewards()
-    high = settings.get("reward_high_threshold", 32)
-    mid = settings.get("reward_mid_threshold", 19)
-    level = "high" if score >= high else ("mid" if score >= mid else "low")
-    level_rewards = [r for r in rewards if r.get("level") == level]
-    return random.choice(level_rewards) if level_rewards else None
-
-
-def get_animal_by_score(score, settings):
-    animals = load_animals()
-    th = settings.get("loot_thresholds", {})
-    if score <= th.get("lemming_max", 14):
-        choices = [1]
-    elif score <= th.get("hare_max", 27):
-        choices = [2, 2, 2, 1, 1]
-    elif score <= th.get("deer_max", 36):
-        choices = [3, 3, 3, 3, 3, 2, 2, 2, 4, 4]
-    elif score <= th.get("muskox_max", 44):
-        choices = [4, 4, 4, 4, 4, 3, 3, 3, 3, 5]
-    else:
-        choices = [5]
-    return next((a for a in animals if a.get("level") == random.choice(choices)), None)
-
-
-# ============== КОМАНДЫ ==============
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    settings = load_settings()
-    settings["user_id"] = user_id
-    save_json(SETTINGS_FILE, settings)
-    
-    title = get_title()
-    await update.message.reply_text(
-        f"🏹 Добро пожаловать, {title}!\n\n"
-        "Команды:\n/status — статус\n/tasks — задачи\n/pinok — пинок\n/morning — начать день\n"
-        "/evening — вечерний отчёт\n/summary — итоги дня\n\n"
-        "Вперёд к победам!"
-    )
-    schedule_daily_jobs(context)
-
-
+# ============== КОМАНДА /status ==============
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-    p = get_today_progress()
-    goals = settings.get("quarter_goals_text", "Не установлены")
-    title = get_title()
-    await update.message.reply_text(
-        f"🏹 Статус {title}\n\nРанг: {settings.get('rank_name', 'Вождь')}\n\n"
-        f"📊 Сегодня:\nЧек-инов: {p['checkins']}\nОчки: {p['score']}/{p['max_score']}\n"
-        f"Задач: {p['tasks_done']}/{p['tasks_total']}\n\n🎯 Цели:\n{goals}"
-    )
-
-
-async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    daily = load_daily()
-    today = get_today_str()
-    if today not in daily or not daily[today].get("tasks"):
-        await update.message.reply_text("📋 План не сформирован. /morning")
-        return
+    """Показать статус"""
+    data = load_data()
+    data = reset_daily_if_needed(data)
     
-    tasks = load_tasks()
-    task_map = {t["id"]: t for t in tasks}
-    today_data = daily[today]
-    completed = today_data.get("completed_tasks", [])
-    pending = today_data.get("pending_tasks", [])
+    zubiki = data.get("zubiki", 0)
+    cold = data.get("cold", 0)
+    blocked = data.get("today_bonuses_blocked", [])
     
-    text = "🎯 План:\n\n"
-    for i, tid in enumerate(today_data["tasks"], 1):
-        t = task_map.get(tid)
-        if t:
-            text += f"{'✅' if tid in completed else '⬜'} {i}) {t['text']}\n"
+    # Оставшиеся бонусы на сегодня
+    now = now_msk()
+    remaining_bonuses = []
+    for hour, minute, name, price, _ in BONUS_SCHEDULE:
+        bonus_time = time(hour, minute)
+        if now.time() < bonus_time and name not in blocked:
+            remaining_bonuses.append(f"  {get_bonus_text(name)}: {price} зуб.")
     
-    text += f"\nОтмечено: {today_data.get('done_task_count', 0)}/{len(today_data['tasks'])}"
+    text = f"📊 СТАТУС ПРИШЛОГО\n\n"
+    text += f"🏛 Эра: Мезолит\n"
+    text += f"👤 Ранг: Пришлый у стоянки\n\n"
+    text += f"💀 Зубики: {zubiki}\n"
+    text += f"❄️ Холод: {cold}/2\n\n"
     
-    if pending:
-        text += f"\n📦 В очереди: {len(pending)} задач"
+    if blocked:
+        text += f"🚫 Заблокировано сегодня:\n"
+        for b in blocked:
+            text += f"  • {get_bonus_text(b)}\n"
+        text += "\n"
+    
+    if remaining_bonuses:
+        text += f"📅 Предстоящие бонусы:\n"
+        text += "\n".join(remaining_bonuses)
+    else:
+        text += "📅 Все бонусы на сегодня прошли."
+    
+    phrase = get_phrase("identity")
+    text += f"\n\n💬 {phrase}"
     
     await update.message.reply_text(text)
 
 
-async def cmd_pinok(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    p = get_today_progress()
-    await update.message.reply_text(f"👊 {get_random_kick()}\n\n📊 {p['checkins']} чек-инов, {p['score']}/{p['max_score']} очков")
-
-
-async def cmd_morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_morning_message(context)
-
-
-async def cmd_evening(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_evening_tasks_request(context)
-
-
-async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_final_summary(context, update.effective_chat.id)
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await handle_completed_tasks(update, context):
+# ============== КОМАНДА /start ==============
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Запуск бота"""
+    user_id = update.effective_user.id
+    
+    data = load_data()
+    data["user_id"] = user_id
+    data["current_date"] = today_str()
+    save_data(data)
+    
+    if not is_bot_active():
+        if now_msk() >= BOT_END:
+            phrase = get_phrase("bot_end")
+            await update.message.reply_text(f"🏁 {phrase}")
+        else:
+            await update.message.reply_text("⏳ Бот ещё не запущен. Старт: 17.01.2026 в 16:00")
         return
-    if await handle_carry_selection(update, context):
-        return
+    
+    phrase = get_phrase("identity")
+    
+    await update.message.reply_text(
+        f"🏕 СТОЯНКА — МЕЗОЛИТ\n\n"
+        f"Ты — Пришлый. Тебя терпят, пока есть польза.\n\n"
+        f"💀 Зубики: 0\n"
+        f"❄️ Холод: 0\n\n"
+        f"Команды:\n"
+        f"/status — статус\n"
+        f"/done — отметить дело (+1 зубик)\n\n"
+        f"💬 {phrase}\n\n"
+        f"Бот работает до 14.02.2026"
+    )
+    
+    # Запускаем расписание
+    schedule_daily_jobs(context)
+    schedule_bonuses(context, user_id)
+    schedule_next_benefit_check(context)
 
 
+# ============== ПРОВЕРКА ОКОНЧАНИЯ ==============
+async def check_bot_end(context: ContextTypes.DEFAULT_TYPE):
+    """Проверить окончание работы бота"""
+    if now_msk() >= BOT_END:
+        data = load_data()
+        user_id = data.get("user_id")
+        if user_id:
+            phrase = get_phrase("bot_end")
+            zubiki = data.get("zubiki", 0)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"🏁 {phrase}\n\n📊 Итого заработано: {zubiki} зубиков"
+            )
+        
+        # Останавливаем все джобы
+        for job in context.job_queue.jobs():
+            job.schedule_removal()
+
+
+# ============== ПЛАНИРОВЩИК ==============
 def schedule_daily_jobs(context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-    for name in ["morning_weekday", "morning_weekend", "evening_tasks"]:
+    """Запланировать ежедневные джобы"""
+    # Удаляем старые
+    for name in ["morning", "check_end"]:
         for job in context.job_queue.get_jobs_by_name(name):
             job.schedule_removal()
     
-    context.job_queue.run_daily(send_morning_message, time=parse_time(settings.get("weekday_wakeup", "06:00")), days=(0,1,2,3,4), name="morning_weekday")
-    context.job_queue.run_daily(send_morning_message, time=parse_time(settings.get("weekend_wakeup", "08:00")), days=(5,6), name="morning_weekend")
-    context.job_queue.run_daily(send_evening_tasks_request, time=parse_time(settings.get("workday_end", "22:30")), name="evening_tasks")
-    logger.info("Jobs scheduled")
+    # Утреннее сообщение в 5:30
+    context.job_queue.run_daily(
+        send_morning_message,
+        time=WAKEUP_TIME,
+        name="morning"
+    )
+    
+    # Проверка окончания каждый час
+    context.job_queue.run_repeating(
+        check_bot_end,
+        interval=timedelta(hours=1),
+        first=timedelta(minutes=1),
+        name="check_end"
+    )
+    
+    logger.info("Ежедневные джобы запланированы")
 
 
+# ============== MAIN ==============
 def main():
     ensure_data_dir()
     if not BOT_TOKEN:
@@ -856,19 +744,15 @@ def main():
         return
     
     app = Application.builder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("tasks", cmd_tasks))
-    app.add_handler(CommandHandler("pinok", cmd_pinok))
-    app.add_handler(CommandHandler("morning", cmd_morning))
-    app.add_handler(CommandHandler("evening", cmd_evening))
-    app.add_handler(CommandHandler("summary", cmd_summary))
-    app.add_handler(CallbackQueryHandler(handle_role_selection, pattern="^role_"))
-    app.add_handler(CallbackQueryHandler(handle_checkin_response, pattern="^checkin_"))
-    app.add_handler(CallbackQueryHandler(handle_evening_choice, pattern="^evening_"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CommandHandler("done", cmd_done))
     
-    logger.info("Bot starting...")
+    app.add_handler(CallbackQueryHandler(handle_morning_response, pattern="^morning_"))
+    app.add_handler(CallbackQueryHandler(handle_benefit_response, pattern="^benefit_"))
+    
+    logger.info("Бот Стоянка запускается...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
