@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Бот «Стоянка» (Мезолит) v4.0 — Добытчик
+Бот «Стоянка» (Мезолит) v4.1 — Добытчик
 Логика: Сделал дело = +12ч сытости, Попробовал = +4ч сытости
 Режимы: Хорошо (<12ч), Нехорошо (12-24ч), Бунт (>24ч)
 """
@@ -16,6 +16,8 @@ from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
 import pytz
@@ -380,8 +382,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏹 ДОБЫТЧИК — МЕЗОЛИТ\n\n"
         f"Твоя задача: кормить племя.\n\n"
         f"Команды:\n"
-        f"/сделал или /done — Принёс добычу (+12ч)\n"
-        f"/попробовал или /tried — Попытался, отложил (+4ч)\n"
+        f"/done или напиши 'сделал' — Принёс добычу (+12ч)\n"
+        f"/tried или напиши 'попробовал' — Попытался, отложил (+4ч)\n"
         f"/status — Проверить статус\n\n"
         f"⏳ До голода: {time_left:.1f} ч.\n\n"
         f"Бот работает до 14.02.2026"
@@ -473,9 +475,24 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🍖 Без еды: {hours:.1f} ч.\n"
         f"{status_text}\n\n"
         f"Команды:\n"
-        f"/сделал — Принёс добычу (+12ч)\n"
-        f"/попробовал — Попытался (+4ч)"
+        f"/done или 'сделал' — Принёс добычу (+12ч)\n"
+        f"/tried или 'попробовал' — Попытался (+4ч)"
     )
+
+
+# ============== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ==============
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает текстовые сообщения для русских команд"""
+    text = update.message.text.lower().strip()
+    
+    # Проверяем на русские команды
+    if "сделал" in text or "сделала" in text:
+        await cmd_done(update, context)
+    elif "попробовал" in text or "попробовала" in text:
+        await cmd_tried(update, context)
+    # Можно добавить другие варианты:
+    # elif "статус" in text:
+    #     await cmd_status(update, context)
 
 
 # ============== ПРОВЕРКА ОКОНЧАНИЯ ==============
@@ -499,18 +516,22 @@ def main():
     
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Команды на русском и английском
+    # Команды на английском
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("done", cmd_done))
     app.add_handler(CommandHandler("tried", cmd_tried))
-    app.add_handler(CommandHandler("сделал", cmd_done))
-    app.add_handler(CommandHandler("попробовал", cmd_tried))
+    
+    # Обработчик текстовых сообщений для русских команд
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, 
+        handle_text
+    ))
     
     # Главный таймер — каждую минуту
     app.job_queue.run_repeating(main_timer, interval=60, first=10)
     
-    logger.info("Бот Добытчик v4.0 запускается...")
+    logger.info("Бот Добытчик v4.1 запускается...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
